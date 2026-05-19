@@ -156,39 +156,10 @@ class GrowthEnv(PretrainBase):
         return ratio > self.threshold
 
     def _build_text_iter(self):
-        import random
-        try:
-            import datasets as hf
-            ds = hf.load_dataset("codeparrot/github-code", "Python",
-                                  split="train", streaming=True,
-                                  trust_remote_code=True)
-            text_key = 'code'
-        except Exception:
-            ds = None; text_key = None
-
         from brain.tokenizer import get_tokenizer
         tok = get_tokenizer()
-        seq = self.seq_len; bsz = self.batch_sz; dev = self.device
-
-        def _gen():
-            buf = []
-            if ds is not None:
-                it = iter(ds)
-                while True:
-                    try:
-                        row = next(it); ids = tok.encode(row.get(text_key,''))[:seq*4]
-                        buf.extend(ids)
-                        while len(buf) >= (seq+1)*bsz:
-                            chunk = buf[:(seq+1)*bsz]; buf = buf[seq:]
-                            yield torch.tensor(chunk, dtype=torch.long, device=dev).view(bsz, seq+1)
-                    except StopIteration:
-                        it = iter(ds)
-            else:
-                while True:
-                    ids = [random.randint(0, 33023) for _ in range((seq+1)*bsz)]
-                    yield torch.tensor(ids, dtype=torch.long, device=dev).view(bsz, seq+1)
-
-        return _gen()
+        from pretrain_env.corpus import get_corpus_iter
+        return get_corpus_iter(tok, self.seq_len, self.batch_sz, self.device)
 
 
 # ── Net2Net expansion ──────────────────────────────────────────────────────────

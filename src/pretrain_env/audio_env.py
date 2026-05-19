@@ -24,7 +24,6 @@ class AudioAlignEnv(PretrainBase):
     """
 
     cert_name    = "audio_aligned"
-    mastery_loss = 3.5
     patience     = 500
 
     def __init__(self, brain, optimizer, device, batch_size=2,
@@ -129,8 +128,7 @@ class AudioFineTuneEnv(AudioAlignEnv):
     """Fine-tune last N Whisper encoder layers. Requires: 'audio_aligned'."""
 
     cert_name    = "audio_finetuned"
-    mastery_loss = 2.8
-    patience     = 2000
+    patience     = 500
     last_n_layers = 2
 
     def __init__(self, *args, last_n_layers: int = 2, **kwargs):

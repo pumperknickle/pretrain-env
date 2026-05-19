@@ -31,7 +31,6 @@ class VisionAlignEnv(PretrainBase):
     """
 
     cert_name    = "vision_aligned"
-    mastery_loss = 3.0
     patience     = 500
 
     def __init__(
@@ -182,8 +181,7 @@ class VisionFineTuneEnv(VisionAlignEnv):
     """
 
     cert_name    = "vision_finetuned"
-    mastery_loss = 2.5
-    patience     = 2000
+    patience     = 500
     last_n_layers = 4   # unfreeze last 4 ViT layers
 
     def __init__(self, *args, last_n_layers: int = 4, **kwargs):

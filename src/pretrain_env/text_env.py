@@ -4,7 +4,6 @@ TextAlignEnv: next-token prediction on text/code corpus.
 Trains: SSM weights + language head + embedding table.
 Frozen:  SigLIP, Whisper (they're not needed for text).
 
-Cert: "text_aligned" when CE loss < mastery_loss for patience steps.
 
 Data sources (streaming, no full download):
   'code':  codeparrot/github-code (Python subset)
@@ -24,8 +23,7 @@ class TextAlignEnv(PretrainBase):
     """Next-token prediction. Trains SSM + embed + head. SigLIP/Whisper frozen."""
 
     cert_name    = "text_aligned"
-    mastery_loss = 2.5    # achievable in ~10K steps for small model
-    patience     = 1000
+    patience     = 500
 
     def __init__(
         self,
@@ -33,8 +31,8 @@ class TextAlignEnv(PretrainBase):
         optimizer,
         device:      torch.device,
         data_source: str   = 'code',
-        seq_len:     int   = 512,
-        batch_size:  int   = 4,
+        seq_len:     int   = 128,   # shorter = faster iterations on nano model
+        batch_size:  int   = 8,     # larger batch compensates for shorter seq
         field        = None,
         verbose:     bool  = False,
     ):
@@ -79,47 +77,15 @@ class TextAlignEnv(PretrainBase):
         )
 
     def _build_data_iter(self):
-        try:
-            import datasets as hf
-            if self._data_source == 'code':
-                ds = hf.load_dataset("codeparrot/github-code", "Python",
-                                      split="train", streaming=True,
-                                      trust_remote_code=True)
-                text_key = 'code'
-            else:
-                ds = hf.load_dataset("Skylion007/openwebtext",
-                                      split="train", streaming=True)
-                text_key = 'text'
-        except Exception:
-            ds = None; text_key = None
-
+        """
+        Fast corpus-only iterator. Pre-tokenized once at startup.
+        No network, no threads, no locks — pure CPU tensor ops.
+        """
         from brain.tokenizer import get_tokenizer
+        from pretrain_env.corpus import get_corpus_iter
         tok = get_tokenizer()
-        seq = self.seq_len
-        bsz = self.batch_sz
-        dev = self.device
-
-        def _gen():
-            buf = []
-            if ds is not None:
-                it = iter(ds)
-                while True:
-                    try:
-                        row  = next(it)
-                        text = row.get(text_key, row.get('text', ''))
-                        ids  = tok.encode(text)[:seq * 4]
-                        buf.extend(ids)
-                        while len(buf) >= (seq + 1) * bsz:
-                            chunk = buf[:(seq+1)*bsz]
-                            buf   = buf[seq:]
-                            t = torch.tensor(chunk, dtype=torch.long, device=dev)
-                            yield t.view(bsz, seq + 1)
-                    except StopIteration:
-                        it = iter(ds)
-            else:
-                V = 33024
-                while True:
-                    ids = [random.randint(0, V-1) for _ in range((seq+1)*bsz)]
-                    yield torch.tensor(ids, dtype=torch.long, device=dev).view(bsz, seq+1)
-
-        return _gen()
+        if self.verbose:
+            from pretrain_env.corpus import PYTHON_CORPUS
+            print(f"  TextAlignEnv: corpus ({len(PYTHON_CORPUS)} snippets, "
+                  f"seq={self.seq_len} batch={self.batch_sz})", flush=True)
+        return get_corpus_iter(tok, self.seq_len, self.batch_sz, self.device)

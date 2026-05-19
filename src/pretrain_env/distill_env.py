@@ -24,8 +24,7 @@ class DistillEnv(PretrainBase):
     Full brain unfrozen. Soft + hard targets.
     """
 
-    mastery_loss = 2.0
-    patience     = 3000
+    patience     = 500
 
     def __init__(
         self,
@@ -134,36 +133,14 @@ class DistillEnv(PretrainBase):
         return {'model': model, 'tokenizer': tok}
 
     def _build_data_iter(self):
-        import random
-        try:
-            import datasets as hf
-            ds = hf.load_dataset("codeparrot/github-code", "Python",
-                                  split="train", streaming=True, trust_remote_code=True)
-            text_key = 'code'
-        except Exception:
-            ds = None; text_key = None
-
         from brain.tokenizer import get_tokenizer
         tok = get_tokenizer()
         seq = self.seq_len; bsz = self.batch_sz; dev = self.device
+        from pretrain_env.corpus import get_corpus_iter
+        corpus_gen = get_corpus_iter(tok, seq, bsz, dev, repeat=True)
 
         def _gen():
-            buf = []
-            if ds is not None:
-                it = iter(ds)
-                while True:
-                    try:
-                        row  = next(it)
-                        ids  = tok.encode(row.get(text_key,''))[:seq*4]
-                        buf.extend(ids)
-                        while len(buf) >= (seq+1)*bsz:
-                            chunk = buf[:(seq+1)*bsz]; buf = buf[seq:]
-                            yield torch.tensor(chunk, dtype=torch.long, device=dev).view(bsz, seq+1)
-                    except StopIteration:
-                        it = iter(ds)
-            else:
-                while True:
-                    ids = [random.randint(0, 33023) for _ in range((seq+1)*bsz)]
-                    yield torch.tensor(ids, dtype=torch.long, device=dev).view(bsz, seq+1)
+            while True:
+                yield next(corpus_gen)
 
         return _gen()

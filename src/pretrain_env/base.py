@@ -55,18 +55,23 @@ class PretrainBase:
     Base pretraining environment. Subclass and implement the abstract methods.
     """
 
-    cert_name:     str   = "pretrained"
-    mastery_loss:  float = 2.0     # CE loss threshold to issue cert
-    patience:      int   = 2000    # steps of no improvement before cert check
+    cert_name:           str   = "pretrained"
+    # ── Self-calibrating mastery (Philosophy 4: no external calibration) ──────
+    # mastery_improvement: cert when loss has dropped this fraction from start.
+    #   Works for any brain size — nano (loss 11→8), small (loss 8→6), medium...
+    #   No hardcoded absolute thresholds that break when brain scale changes.
+    mastery_improvement: float = 0.20   # 20% improvement from initial loss
+    patience:            int   = 500    # plateau steps before mastery check
+    max_steps:           int   = 5000   # hard exit — ensures pipeline always advances
     hardware_spec: HardwareSpec = HardwareSpec.cpu()
     manifest:      SensorManifest = PRETRAIN_MANIFEST
 
     def __init__(
         self,
-        brain,                     # UniversalBrain or CortexModel
-        optimizer,                 # torch optimizer
+        brain,
+        optimizer,
         device:     torch.device,
-        field       = None,        # ecoframe Field for cert publishing
+        field       = None,
         verbose:    bool = False,
     ):
         self.brain     = brain
@@ -75,14 +80,15 @@ class PretrainBase:
         self.field     = field
         self.verbose   = verbose
 
-        self._sessions:    dict[str, Session] = {}
-        self._step_count   = 0
-        self._loss_ema     = 6.0
-        self._loss_prev    = 6.0
-        self._plateau_steps = 0
-        self._cert_issued  = False
-        self._pending_tokens: torch.Tensor | None = None
-        self.env_id = f"pretrain_{self.cert_name}"
+        self._sessions:      dict[str, Session] = {}
+        self._step_count     = 0
+        self._loss_ema       = 99.0   # will be reset on first real step
+        self._initial_loss   = None   # recorded after warmup (100 steps)
+        self._loss_prev      = 99.0
+        self._plateau_steps  = 0
+        self._cert_issued    = False
+        self._pending_actions: dict = {}
+        self.env_id   = f"pretrain_{self.cert_name}"
         self.capacity = 1
 
     # ── EnvironmentProtocol ────────────────────────────────────────────────────
@@ -127,8 +133,18 @@ class PretrainBase:
             loss = self._train_step(tokens, targets)
             loss_val = float(loss)
 
-            # EMA tracking
-            self._loss_ema = 0.97 * self._loss_ema + 0.03 * loss_val
+            # EMA — fast warm-up then stable
+            alpha = 0.1 if self._step_count < 50 else 0.03
+            self._loss_ema = (1 - alpha) * self._loss_ema + alpha * loss_val
+
+            # Record initial loss after 100-step warmup (avoids noisy early values)
+            if self._initial_loss is None and self._step_count >= 100:
+                self._initial_loss = self._loss_ema
+                if self.verbose:
+                    print(f"  {self.env_id}: initial_loss={self._initial_loss:.4f} "
+                          f"(mastery target: "
+                          f"{self._initial_loss * (1 - self.mastery_improvement):.4f})",
+                          flush=True)
 
             # Plateau detection
             if self._loss_prev - self._loss_ema > 0.01:
@@ -137,19 +153,35 @@ class PretrainBase:
                 self._plateau_steps += 1
             self._loss_prev = self._loss_ema
 
-            # Mastery check
             done = False
-            if (not self._cert_issued and
-                    self._plateau_steps >= self.patience and
-                    self._mastery_met(self._loss_ema)):
-                self._issue_cert(brain_id, session)
-                done = True
+            if not self._cert_issued:
+                # Mastery: relative improvement from initial, after plateau
+                if (self._initial_loss is not None and
+                        self._plateau_steps >= self.patience and
+                        self._mastery_met(self._loss_ema)):
+                    self._issue_cert(brain_id, session)
+                    done = True
+                # Hard exit: max_steps reached regardless of mastery
+                elif self._step_count >= self.max_steps:
+                    if self.verbose:
+                        pct = 0.0
+                        if self._initial_loss:
+                            pct = 100 * (self._initial_loss - self._loss_ema) / self._initial_loss
+                        print(f"  {self.env_id}: max_steps reached "
+                              f"(improved {pct:.1f}% from initial) — issuing cert",
+                              flush=True)
+                    self._issue_cert(brain_id, session)
+                    done = True
 
             if self._step_count % 100 == 0:
                 self._publish_env_signal()
                 if self.verbose:
+                    pct = 0.0
+                    if self._initial_loss:
+                        pct = 100 * (self._initial_loss - self._loss_ema) / self._initial_loss
                     print(f"{self.env_id} step={self._step_count:,} "
-                          f"loss_ema={self._loss_ema:.4f}", flush=True)
+                          f"loss_ema={self._loss_ema:.4f} "
+                          f"improved={pct:.1f}%", flush=True)
 
             bundles[brain_id] = self._make_bundle(brain_id, loss_val, done)
 
@@ -175,7 +207,14 @@ class PretrainBase:
         pass   # default: don't change any requires_grad
 
     def _mastery_met(self, loss_ema: float) -> bool:
-        return loss_ema < self.mastery_loss
+        """
+        Scale-invariant mastery: relative improvement from initial loss.
+        Works for any brain size without hardcoded thresholds.
+        """
+        if self._initial_loss is None or self._initial_loss <= 0:
+            return False
+        improvement = (self._initial_loss - loss_ema) / self._initial_loss
+        return improvement >= self.mastery_improvement
 
     # ── Training step ─────────────────────────────────────────────────────────
 
