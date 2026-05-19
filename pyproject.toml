@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pretrain-env"
+version = "0.1.0"
+description = "Pretraining and distillation environments as ecoframe EnvironmentProtocol"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "ecoframe>=0.1.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+full = [
+    "transformers>=4.40",
+    "datasets>=2.0",
+    "bitsandbytes>=0.43",
+    "accelerate>=0.28",
+    "torch>=2.1",
+]
+dev = ["pytest>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pretrain_env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
