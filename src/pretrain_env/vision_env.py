@@ -138,41 +138,105 @@ class VisionAlignEnv(PretrainBase):
                                targets.reshape(-1), ignore_index=-1)
 
     def _build_data_iter(self):
-        """Image-caption data. Falls back to random images + tokenized captions."""
+        """
+        Real image-caption pairs. Philosophy 2: real data, not synthetic noise.
+
+        Uses CIFAR-10 from HuggingFace: real photographs of objects with class labels.
+        SigLIP was trained on real images — feeding it noise (old approach) taught the
+        brain to recognize Gaussian patterns, not visual concepts.
+
+        CIFAR-10 labels become natural-language captions: "a photo of a dog", etc.
+        Images are 32×32, upscaled to 224×224 for SigLIP.
+        """
         from brain.tokenizer import get_tokenizer
+        import torchvision.transforms as T
         tok = get_tokenizer()
         dev = self.device
         bsz = self.batch_sz
-        sz  = self.img_size
 
-        # Try loading LAION-CC3M or similar
+        CIFAR_LABELS = [
+            "a photo of an airplane",
+            "a photo of a car",
+            "a photo of a bird",
+            "a photo of a cat",
+            "a photo of a deer",
+            "a photo of a dog",
+            "a photo of a frog",
+            "a photo of a horse",
+            "a photo of a ship",
+            "a photo of a truck",
+        ]
+
+        # Load CIFAR-10 via HuggingFace (streaming — first batch available immediately)
+        ds = None
         try:
             import datasets as hf
-            ds = hf.load_dataset("conceptual_captions", split="train",
-                                  streaming=True, trust_remote_code=True)
-            from PIL import Image
-            import requests
-            from io import BytesIO
-            use_real = True
-        except Exception:
-            use_real = False
+            ds = hf.load_dataset("cifar10", split="train", streaming=True)
+            if self.verbose:
+                print("  VisionAlignEnv: using CIFAR-10 real images", flush=True)
+        except Exception as e:
+            if self.verbose:
+                print(f"  VisionAlignEnv: CIFAR-10 unavailable ({e}), "
+                      f"trying alternative...", flush=True)
+
+        # Fallback: tiny-imagenet or beans dataset
+        if ds is None:
+            try:
+                import datasets as hf
+                ds = hf.load_dataset("beans", split="train", streaming=True)
+                CIFAR_LABELS = ["a photo of an angular leaf spot",
+                                 "a photo of a bean rust", "a photo of a healthy bean"]
+                if self.verbose:
+                    print("  VisionAlignEnv: using beans dataset", flush=True)
+            except Exception:
+                pass
+
+        transform = T.Compose([
+            T.Resize((224, 224)),
+            T.ToTensor(),   # → [0,1] float32 CHW
+        ])
+
+        from PIL import Image as PILImage
+        import numpy as np
+
+        def _iter_real():
+            it = iter(ds)
+            buf_imgs, buf_caps = [], []
+            while True:
+                try:
+                    row   = next(it)
+                    # CIFAR-10 has 'img' (PIL) and 'label' (int)
+                    img   = row.get('img') or row.get('image')
+                    label = row.get('label', 0)
+                    if img is None:
+                        continue
+                    if not isinstance(img, PILImage.Image):
+                        img = PILImage.fromarray(np.array(img).astype(np.uint8))
+                    img = img.convert('RGB')
+                    t   = transform(img)   # (3, 224, 224)
+                    cap = CIFAR_LABELS[int(label) % len(CIFAR_LABELS)]
+                    buf_imgs.append(t)
+                    buf_caps.append(cap)
+                    if len(buf_imgs) >= bsz:
+                        imgs   = torch.stack(buf_imgs[:bsz]).to(dev)
+                        cap    = buf_caps[0]   # one caption per batch
+                        cap_ids = tok.encode(cap)[:64]
+                        cap_ids += [0] * (64 - len(cap_ids))
+                        cap_t  = torch.tensor([cap_ids]*bsz, dtype=torch.long, device=dev)
+                        yield imgs, cap_t
+                        buf_imgs = buf_imgs[bsz:]
+                        buf_caps = buf_caps[bsz:]
+                except StopIteration:
+                    it = iter(ds)
 
         def _gen():
-            captions = [
-                "a photo of a car driving on a road",
-                "a person writing code on a laptop",
-                "a robot navigating through a room",
-                "a bird flying over a forest",
-                "geometric shapes on a white background",
-            ]
-            while True:
-                # Synthetic fallback: random images + fixed captions
-                imgs = torch.randn(bsz, 3, sz, sz, device=dev).clamp(0, 1)
-                cap  = random.choice(captions)
-                cap_ids = tok.encode(cap)[:64]
-                cap_ids += [0] * (64 - len(cap_ids))
-                cap_t = torch.tensor([cap_ids] * bsz, dtype=torch.long, device=dev)
-                yield imgs, cap_t
+            if ds is not None:
+                yield from _iter_real()
+            else:
+                # Hard failure — raise so we know real data is unavailable
+                raise RuntimeError(
+                    "VisionAlignEnv: no real image dataset available. "
+                    "Install datasets: pip install datasets")
 
         return _gen()
 
