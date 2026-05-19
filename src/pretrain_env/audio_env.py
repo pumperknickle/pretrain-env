@@ -58,26 +58,32 @@ class AudioAlignEnv(PretrainBase):
         """Encode audio via Whisper, predict transcript tokens."""
         self.optimizer.zero_grad()
         raw = self._get_raw()
+        model_dtype = next(raw.parameters()).dtype
+        device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
 
-        with torch.enable_grad():
+        with torch.enable_grad(), torch.autocast(device_type=device_type, dtype=model_dtype):
+
             if hasattr(self.brain, 'whisper') and self.brain.whisper:
                 a_tokens, a_pos = self.brain.encode_audio(mel)
+                a_tokens = a_tokens.to(model_dtype)   # Whisper returns float32
             else:
                 d = raw.cfg.d_model
                 a_tokens = torch.zeros(mel.shape[0], 100, d, device=self.device,
-                                       dtype=next(raw.parameters()).dtype)
+                                       dtype=model_dtype)
                 a_pos    = torch.zeros(mel.shape[0], 100, 3, dtype=torch.long,
                                        device=self.device)
 
             t_tokens, t_pos = self.brain.encode_text(transcript_ids[:, :-1])
+            t_tokens = t_tokens.to(model_dtype)
             all_tokens = torch.cat([a_tokens, t_tokens], dim=1)
             all_pos    = torch.cat([a_pos,    t_pos],    dim=1)
 
             empty = torch.zeros(mel.shape[0], 0, dtype=torch.long, device=self.device)
             _, _, _, h_all = raw.forward_stateful(
                 idx=empty, extra_embeds=[(all_tokens, all_pos)])
-            h_text = h_all[:, -transcript_ids.shape[1]+1:, :]
-            logits = raw.head(h_text)
+            n_cap = transcript_ids.shape[1] - 1   # input tokens = T-1
+            h_text = h_all[:, -n_cap:, :]
+            logits = raw.head(h_text.to(model_dtype))
 
             V = logits.shape[-1]
             loss = F.cross_entropy(

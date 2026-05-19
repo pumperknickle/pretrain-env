@@ -85,32 +85,37 @@ class VisionAlignEnv(PretrainBase):
 
         self.optimizer.zero_grad()
         raw = self._get_raw()
+        model_dtype = next(raw.parameters()).dtype
+        device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
 
-        with torch.enable_grad():
+        with torch.enable_grad(), torch.autocast(device_type=device_type, dtype=model_dtype):
+
             # Visual tokens via SigLIP
             if hasattr(self.brain, 'siglip') and self.brain.siglip:
                 v_tokens, v_pos = self.brain.encode_visual(images)
+                v_tokens = v_tokens.to(model_dtype)  # SigLIP returns float32
             else:
                 v_tokens = torch.zeros(
                     images.shape[0], 196, raw.cfg.d_model,
-                    device=self.device, dtype=next(raw.parameters()).dtype)
+                    device=self.device, dtype=model_dtype)
                 v_pos = torch.zeros(images.shape[0], 196, 3,
                                     dtype=torch.long, device=self.device)
 
             # Caption context tokens
             t_tokens, t_pos = self.brain.encode_text(caption_ids[:, :-1])
+            t_tokens = t_tokens.to(model_dtype)
             all_tokens = torch.cat([v_tokens, t_tokens], dim=1)
             all_pos    = torch.cat([v_pos,    t_pos],    dim=1)
 
             empty = torch.zeros(images.shape[0], 0, dtype=torch.long, device=self.device)
-            logits, *_ = raw.forward_stateful(idx=empty, extra_embeds=[(all_tokens, all_pos)])
-
-            if logits is None:
-                # forward_stateful doesn't return logits — use head directly
-                _, _, _, h_all = raw.forward_stateful(
-                    idx=empty, extra_embeds=[(all_tokens, all_pos)])
-                h_last = h_all[:, -caption_ids.shape[1]+1:, :]
-                logits = raw.head(h_last)
+            # forward_stateful returns (logits, loss, new_ssm, h_all)
+            _, _, _, h_all = raw.forward_stateful(idx=empty, extra_embeds=[(all_tokens, all_pos)])
+            # caption input = caption_ids[:, :-1] (L-1 tokens)
+            # caption target = caption_ids[:, 1:]  (L-1 tokens)
+            # h_all last (L-1) positions correspond to caption inputs
+            n_cap = caption_ids.shape[1] - 1
+            h_last = h_all[:, -n_cap:, :]
+            logits = raw.head(h_last.to(model_dtype))
 
             targets_shifted = caption_ids[:, 1:]
             V = logits.shape[-1]

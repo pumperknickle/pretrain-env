@@ -223,9 +223,13 @@ class PretrainBase:
     ) -> torch.Tensor:
         self.optimizer.zero_grad()
         raw = self._get_raw()
+        model_dtype = next(raw.parameters()).dtype
         pos = torch.zeros(*tokens.shape, 3, dtype=torch.long, device=self.device)
-        with torch.enable_grad():
-            logits = raw(tokens, pos)
+        # autocast ensures the full forward pass runs in the model's native dtype
+        # (bfloat16 for our brains), regardless of input dtype.
+        device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
+        with torch.enable_grad(), torch.autocast(device_type=device_type, dtype=model_dtype):
+            logits = raw(tokens.to(model_dtype), pos)
             loss   = self._compute_loss(logits, targets)
         if loss.isfinite() and float(loss.detach().abs()) > 1e-10:
             loss.backward()
